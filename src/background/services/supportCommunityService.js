@@ -3,7 +3,9 @@
 const API_BASE = 'https://api.worldquantbrain.com';
 const SUPPORT_BASE = 'https://support.worldquantbrain.com';
 const LIKED_IDS_KEY = 'WQP_LikedIds';
-const DEFAULT_MAX_PAGES = 60;
+const DEFAULT_MAX_PAGES = 0; // 0 means no page cap, matching voteup.js recursion.
+const TEXT_REQUEST_MAX_RETRIES = 3;
+const MENTION_LOOKUP_MAX_RETRIES = 10;
 const ZENDESK_API_PAGE_SIZE = 100;
 const ZENDESK_RATE_LIMIT_MAX_RETRIES = 6;
 const ZENDESK_RATE_LIMIT_BASE_DELAY_MS = 2000;
@@ -40,6 +42,11 @@ function progressBar(ctx, message, current, total, label, id = 'overall') {
 function progressScope(payload, key, fallback) {
     const value = String(payload?.[key] || '').trim();
     return value || fallback;
+}
+
+function hasPageBudget(page, maxPages) {
+    const limit = Number(maxPages || 0);
+    return !Number.isFinite(limit) || limit <= 0 || page < limit;
 }
 
 function createVoteStats() {
@@ -147,12 +154,29 @@ async function validateSupportSession(ctx = {}) {
 }
 
 async function fetchText(url, init = {}) {
-    const response = await fetch(url, withCredentials(init));
-    const text = await response.text();
-    if (!response.ok) {
-        throw new Error(`HTTP ${response.status} ${response.statusText} for ${url}`);
+    let lastError = null;
+    for (let attempt = 0; attempt <= TEXT_REQUEST_MAX_RETRIES; attempt += 1) {
+        try {
+            const response = await fetch(url, withCredentials(init));
+            const text = await response.text();
+            if (response.ok) {
+                return { response, text };
+            }
+            lastError = new Error(`HTTP ${response.status} ${response.statusText} for ${url}${text ? ` ${text.slice(0, 300)}` : ''}`);
+            lastError.retryable = response.status === 429 || response.status >= 500;
+            if ((response.status === 429 || response.status >= 500) && attempt < TEXT_REQUEST_MAX_RETRIES) {
+                await sleep(retryDelayMs(response, attempt));
+                continue;
+            }
+            throw lastError;
+        } catch (error) {
+            lastError = error;
+            if (error?.retryable === false) throw error;
+            if (attempt >= TEXT_REQUEST_MAX_RETRIES) break;
+            await sleep(ZENDESK_RATE_LIMIT_BASE_DELAY_MS * (2 ** attempt));
+        }
     }
-    return { response, text };
+    throw lastError;
 }
 
 async function fetchJson(url, init = {}) {
@@ -161,6 +185,31 @@ async function fetchJson(url, init = {}) {
         throw new Error(`HTTP ${response.status} ${response.statusText} for ${url}`);
     }
     return response.json();
+}
+
+async function fetchJsonRetry(url, init = {}, ctx = {}, options = {}) {
+    const maxRetries = Number(options.maxRetries ?? ZENDESK_RATE_LIMIT_MAX_RETRIES);
+    let lastError = null;
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+        await waitForZendeskRequestSlot();
+        const response = await fetch(url, withCredentials(init));
+        if (response.ok) {
+            return response.json();
+        }
+
+        const preview = await response.text().catch(() => '');
+        lastError = new Error(`HTTP ${response.status} ${response.statusText} for ${url}${preview ? ` ${preview.slice(0, 300)}` : ''}`);
+        lastError.status = response.status;
+        const retryable = response.status === 429 || response.status >= 500;
+        if (!retryable || attempt >= maxRetries) {
+            throw lastError;
+        }
+
+        const delay = retryDelayMs(response, attempt);
+        progress(ctx, `请求触发 ${response.status}，等待 ${Math.ceil(delay / 1000)} 秒后重试 (${attempt + 1}/${maxRetries})：${shortApiPath(url)}`);
+        await sleep(delay);
+    }
+    throw lastError;
 }
 
 function sleep(ms) {
@@ -311,10 +360,10 @@ async function queryMentionProfileId(query, ctx = {}) {
     const cleanQuery = String(query || '').trim();
     if (!cleanQuery) return null;
     const url = `${SUPPORT_BASE}/hc/api/internal/communities/mentions.json?query=${encodeURIComponent(cleanQuery)}`;
-    const data = await fetchJson(url, {
+    const data = await fetchJsonRetry(url, {
         method: 'GET',
         headers: { Accept: 'application/json' },
-    });
+    }, ctx, { maxRetries: MENTION_LOOKUP_MAX_RETRIES });
     if (Array.isArray(data) && data[0]?.id) {
         return String(data[0].id);
     }
@@ -375,6 +424,18 @@ function getQuarterStartTime() {
     return new Date(Date.UTC(year, quarterStartMonth, 1, 0, 0, 0));
 }
 
+function compareProfileEntryTime(datetime, quarterStart) {
+    const entryTime = new Date(datetime);
+    const valid = Number.isFinite(entryTime.getTime());
+    return {
+        raw: datetime || '',
+        valid,
+        parsedIso: valid ? entryTime.toISOString() : '',
+        quarterStartIso: quarterStart.toISOString(),
+        inCurrentQuarter: entryTime >= quarterStart,
+    };
+}
+
 function formatBeijingTime(date = new Date()) {
     return date.toLocaleString('zh-CN', {
         timeZone: 'Asia/Shanghai',
@@ -402,6 +463,15 @@ async function getBatchRunLabel(ctx = {}) {
 }
 
 function findNextPageUrl(html, baseUrl) {
+    const anchorRegex = /<a\b[^>]*>/gi;
+    let anchorMatch;
+    while ((anchorMatch = anchorRegex.exec(String(html || ''))) !== null) {
+        const tag = anchorMatch[0];
+        if (!tagHasClass(tag, 'pagination-next-link')) continue;
+        const href = getHtmlAttribute(tag, 'href');
+        if (href) return absoluteUrl(href, baseUrl);
+    }
+
     const patterns = [
         /<a\b[^>]*class=["'][^"']*pagination-next-link[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>/i,
         /<a\b[^>]*href=["']([^"']+)["'][^>]*class=["'][^"']*pagination-next-link[^"']*["'][^>]*>/i,
@@ -409,9 +479,22 @@ function findNextPageUrl(html, baseUrl) {
     ];
     for (const pattern of patterns) {
         const match = html.match(pattern);
-        if (match?.[1]) return absoluteUrl(match[1], baseUrl);
+        if (match?.[1]) return absoluteUrl(decodeHtmlAttributeValue(match[1]), baseUrl);
     }
     return '';
+}
+
+function extractHtmlTitle(html) {
+    const match = String(html || '').match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+    return match?.[1]?.replace(/\s+/g, ' ').trim() || '';
+}
+
+function debugProfileTargets(message, data = {}) {
+    try {
+        console.log(`[WQP profile targets] ${message}`, data);
+    } catch (_) {
+        // Ignore logging failures in extension contexts.
+    }
 }
 
 function extractCommentIds(html) {
@@ -424,59 +507,247 @@ function extractCommentIds(html) {
     return Array.from(ids);
 }
 
-function extractBlocks(html, className) {
-    const blocks = [];
-    const regex = /<(li|div|section|article)\b[^>]*>[\s\S]*?<\/\1>/gi;
-    let match;
-    while ((match = regex.exec(html)) !== null) {
-        const block = match[0];
-        if (block.includes(className)) blocks.push(block);
-    }
-    return blocks;
-}
-
 function extractHref(block, predicate) {
-    const regex = /<a\b[^>]*href=["']([^"']+)["'][^>]*>/gi;
+    const regex = /<a\b[^>]*>/gi;
     let match;
     while ((match = regex.exec(block)) !== null) {
-        const href = match[1] || '';
+        const href = getHtmlAttribute(match[0], 'href');
         if (!predicate || predicate(href, match[0])) return href;
     }
     return '';
 }
 
-function extractDatetime(block) {
-    const match = block.match(/<time\b[^>]*datetime=["']([^"']+)["'][^>]*>/i);
-    return match?.[1] || '';
+function extractFirstTimeDateTime(block) {
+    const match = String(block || '').match(/<time\b[^>]*>/i);
+    return match ? getHtmlAttribute(match[0], 'datetime') : '';
+}
+
+function decodeHtmlAttributeValue(value) {
+    return String(value || '')
+        .replace(/&amp;/gi, '&')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/gi, "'")
+        .replace(/&apos;/gi, "'")
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+        .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)));
+}
+
+function getHtmlAttribute(tag, name) {
+    const pattern = new RegExp(`\\s${name}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i');
+    const match = String(tag || '').match(pattern);
+    return decodeHtmlAttributeValue(match?.[2] || match?.[3] || match?.[4] || '');
+}
+
+function tagHasClass(tag, className) {
+    const classValue = getHtmlAttribute(tag, 'class');
+    return classValue.split(/\s+/).includes(className);
+}
+
+function findOpenTagsByClass(html, className, start = 0, end = String(html || '').length) {
+    const text = String(html || '');
+    const tags = [];
+    const tagRegex = /<([a-z][\w:-]*)\b[^>]*>/gi;
+    tagRegex.lastIndex = Math.max(0, start);
+
+    let match;
+    while ((match = tagRegex.exec(text)) !== null && match.index < end) {
+        if (tagHasClass(match[0], className)) {
+            tags.push({
+                index: match.index,
+                end: tagRegex.lastIndex,
+                tagName: match[1],
+                tag: match[0],
+            });
+        }
+    }
+    return tags;
+}
+
+function escapeRegExp(value) {
+    return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isClosingTag(tagText) {
+    return /^<\s*\//.test(String(tagText || ''));
+}
+
+function findElementRange(html, start, tagName) {
+    const text = String(html || '');
+    const tag = String(tagName || '').toLowerCase();
+    if (!tag) return null;
+
+    const openEnd = text.indexOf('>', start);
+    if (openEnd < 0) return null;
+
+    const tagRegex = new RegExp(`<\\/?${escapeRegExp(tag)}\\b[^>]*>`, 'gi');
+    tagRegex.lastIndex = start;
+    const openMatch = tagRegex.exec(text);
+    if (!openMatch || openMatch.index !== start || isClosingTag(openMatch[0])) return null;
+
+    let depth = 1;
+    let match;
+    while ((match = tagRegex.exec(text)) !== null) {
+        if (isClosingTag(match[0])) {
+            depth -= 1;
+            if (depth === 0) {
+                return {
+                    start,
+                    openEnd,
+                    innerStart: openEnd + 1,
+                    innerEnd: match.index,
+                    end: tagRegex.lastIndex,
+                    openTag: openMatch[0],
+                };
+            }
+        } else {
+            depth += 1;
+        }
+    }
+
+    return null;
+}
+
+function findElementRangesByClass(html, className, start = 0, end = String(html || '').length) {
+    const text = String(html || '');
+    const ranges = [];
+    const tagRegex = /<([a-z][\w:-]*)\b[^>]*>/gi;
+    tagRegex.lastIndex = Math.max(0, start);
+
+    let match;
+    while ((match = tagRegex.exec(text)) !== null && match.index < end) {
+        const openTag = match[0];
+        if (!tagHasClass(openTag, className)) continue;
+
+        const range = findElementRange(text, match.index, match[1]);
+        if (!range || range.start >= end) continue;
+        ranges.push(range);
+        if (range.end > tagRegex.lastIndex) {
+            tagRegex.lastIndex = Math.min(range.end, end);
+        }
+    }
+    return ranges;
+}
+
+function findFirstElementRangeByClass(html, className, start, end) {
+    return findElementRangesByClass(html, className, start, end)[0] || null;
+}
+
+function extractHrefFromRange(html, range, predicate) {
+    if (!range) return '';
+    return extractHref(String(html || '').slice(range.innerStart, range.innerEnd), predicate);
+}
+
+function findFirstDatetimeInRange(html, range) {
+    if (!range) return '';
+    return extractFirstTimeDateTime(String(html || '').slice(range.start, range.end));
+}
+
+function findClosestAncestorRange(html, index, tagName) {
+    const text = String(html || '');
+    const tag = escapeRegExp(tagName);
+    const tagRegex = new RegExp(`<${tag}\\b[^>]*>`, 'gi');
+    let closest = null;
+    let match;
+    while ((match = tagRegex.exec(text)) !== null && match.index <= index) {
+        const range = findElementRange(text, match.index, tagName);
+        if (range && range.start <= index && index < range.end) {
+            closest = range;
+        }
+    }
+    return closest;
+}
+
+function findParentElementRange(html, childRange) {
+    if (!childRange) return null;
+    const text = String(html || '');
+    const tagRegex = /<([a-z][\w:-]*)\b[^>]*>/gi;
+    let parent = null;
+    let match;
+
+    while ((match = tagRegex.exec(text)) !== null && match.index < childRange.start) {
+        const range = findElementRange(text, match.index, match[1]);
+        if (!range) continue;
+        if (range.start < childRange.start && childRange.end <= range.end) {
+            if (!parent || range.start > parent.start) parent = range;
+        }
+    }
+    return parent;
+}
+
+function directChildElementRanges(html, parentRange) {
+    if (!parentRange) return [];
+    const text = String(html || '');
+    const ranges = [];
+    const tagRegex = /<([a-z][\w:-]*)\b[^>]*>/gi;
+    tagRegex.lastIndex = parentRange.innerStart;
+
+    let match;
+    while ((match = tagRegex.exec(text)) !== null && match.index < parentRange.innerEnd) {
+        const range = findElementRange(text, match.index, match[1]);
+        if (!range) continue;
+        if (range.end <= parentRange.innerEnd) {
+            ranges.push(range);
+            tagRegex.lastIndex = Math.max(tagRegex.lastIndex, range.end);
+        }
+    }
+    return ranges;
+}
+
+function findProfileCommentDatetime(html, anchorIndex) {
+    const commentLi = findClosestAncestorRange(html, anchorIndex, 'li');
+    const parent = findParentElementRange(html, commentLi);
+    const siblings = directChildElementRanges(html, parent)
+        .filter((range) => range.start !== commentLi?.start || range.end !== commentLi?.end);
+
+    for (const sibling of siblings) {
+        const datetime = findFirstDatetimeInRange(html, sibling);
+        if (datetime) return datetime;
+    }
+
+    return '';
 }
 
 function parseProfilePostEntries(html, baseUrl) {
-    const blocks = extractBlocks(html, 'profile-contribution');
     const entries = [];
-    for (const block of blocks) {
-        const href = extractHref(block, (value) => value.includes('/community/posts/'));
-        if (!href) continue;
-        const datetime = extractDatetime(block);
+    const contributionRanges = findElementRangesByClass(html, 'profile-contribution');
+    for (const contribution of contributionRanges) {
+        const titleRange = findFirstElementRangeByClass(
+            html,
+            'profile-contribution-title',
+            contribution.innerStart,
+            contribution.innerEnd,
+        );
+        const href = extractHrefFromRange(html, titleRange, (value) => value.includes('/community/posts/'));
+        const url = href ? normalizeSupportUrl(absoluteUrl(href, baseUrl)) : '';
+        if (!url) continue;
         entries.push({
-            url: normalizeSupportUrl(absoluteUrl(href, baseUrl)),
-            datetime,
+            url,
+            datetime: findFirstDatetimeInRange(html, contribution),
+            datetimeSource: '.profile-contribution querySelector("time").dateTime',
         });
     }
     return entries;
 }
 
 function parseProfileCommentEntries(html, baseUrl) {
-    const blocks = extractBlocks(html, 'comment-link');
     const entries = [];
-    for (const block of blocks) {
-        const href = extractHref(block, (value, tag) => {
-            return value.includes('/community/posts/') || tag.includes('comment-link');
-        });
+    const anchorRegex = /<a\b[^>]*>/gi;
+    let match;
+    while ((match = anchorRegex.exec(html)) !== null) {
+        const tag = match[0];
+        if (!tagHasClass(tag, 'comment-link')) continue;
+        const href = getHtmlAttribute(tag, 'href');
         if (!href) continue;
-        const datetime = extractDatetime(block);
+        const fullUrl = absoluteUrl(href, baseUrl);
+        if (!fullUrl) continue;
+        const url = normalizeSupportUrl(fullUrl);
+        if (!url) continue;
         entries.push({
-            url: normalizeSupportUrl(absoluteUrl(href, baseUrl)),
-            datetime,
+            url,
+            datetime: findProfileCommentDatetime(html, match.index),
+            datetimeSource: '.comment-link closest("li") sibling querySelector("time").dateTime',
         });
     }
     return entries;
@@ -893,7 +1164,7 @@ async function collectPostVoteTargets(postUrl, ctx = {}, maxPages = DEFAULT_MAX_
     let pageUrl = basePostUrl;
     let page = 0;
 
-    while (pageUrl && page < maxPages && !visited.has(pageUrl)) {
+    while (pageUrl && hasPageBudget(page, maxPages) && !visited.has(pageUrl)) {
         page += 1;
         visited.add(pageUrl);
         progress(ctx, `抓取帖子评论页 ${page}: ${pageUrl}`);
@@ -935,31 +1206,85 @@ async function collectProfileTargets(profileIdValue, kind, ctx = {}, maxPages = 
     let page = 0;
     let reachedOldEntries = false;
 
-    while (pageUrl && page < maxPages && !visited.has(pageUrl) && !reachedOldEntries) {
+    while (pageUrl && hasPageBudget(page, maxPages) && !visited.has(pageUrl) && !reachedOldEntries) {
         page += 1;
         visited.add(pageUrl);
         progress(ctx, `抓取用户 ${profileId} ${filter} 第 ${page} 页`);
-        const { text } = await fetchText(pageUrl, {
+        const { response, text } = await fetchText(pageUrl, {
             method: 'GET',
             headers: {
                 Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             },
         });
+        debugProfileTargets('fetched profile page', {
+            profileId,
+            filter,
+            page,
+            requestUrl: pageUrl,
+            finalUrl: response?.url || '',
+            status: response?.status,
+            htmlLength: String(text || '').length,
+            title: extractHtmlTitle(text),
+            profileContributionCount: findOpenTagsByClass(text, 'profile-contribution').length,
+            profileContributionTitleCount: findOpenTagsByClass(text, 'profile-contribution-title').length,
+            commentLinkCount: findOpenTagsByClass(text, 'comment-link').length,
+            hasNextPage: Boolean(findNextPageUrl(text, pageUrl)),
+            quarterStart: quarterStart.toISOString(),
+        });
         const entries = kind === 'comments'
             ? parseProfileCommentEntries(text, pageUrl)
             : parseProfilePostEntries(text, pageUrl);
+        debugProfileTargets('parsed profile targets', {
+            profileId,
+            filter,
+            page,
+            entries: entries.length,
+            samples: entries.slice(0, 5).map((entry) => ({
+                url: entry.url,
+                datetime: entry.datetime,
+                datetimeSource: entry.datetimeSource,
+                timeCompare: compareProfileEntryTime(entry.datetime, quarterStart),
+            })),
+        });
+        progress(ctx, `用户 ${profileId} ${filter} 第 ${page} 页解析到 ${entries.length} 个目标`);
 
-        for (const entry of entries) {
-            const time = entry.datetime ? new Date(entry.datetime) : null;
-            if (time && time < quarterStart) {
+        for (let index = 0; index < entries.length; index += 1) {
+            const entry = entries[index];
+            const timeCompare = compareProfileEntryTime(entry.datetime, quarterStart);
+            if (!timeCompare.inCurrentQuarter) {
                 reachedOldEntries = true;
+                debugProfileTargets('stop collecting profile targets', {
+                    profileId,
+                    filter,
+                    page,
+                    entryIndex: index,
+                    reason: timeCompare.valid ? 'before-quarter-start' : 'invalid-datetime',
+                    entry,
+                    timeCompare,
+                    collectedTargets: targets.length,
+                });
                 break;
             }
             if (entry.url) targets.push(entry.url);
         }
         pageUrl = findNextPageUrl(text, pageUrl);
+        debugProfileTargets('profile page done', {
+            profileId,
+            filter,
+            page,
+            collectedTargets: targets.length,
+            nextPageUrl: pageUrl,
+            reachedOldEntries,
+        });
     }
 
+    debugProfileTargets('profile target collection done', {
+        profileId,
+        filter,
+        pages: page,
+        targets: targets.length,
+        maxPages,
+    });
     return targets;
 }
 
@@ -1006,37 +1331,71 @@ export async function upVoteUsers(payload = {}, ctx = {}) {
     const entries = Array.isArray(users)
         ? users.map((item) => [String(item), ''])
         : Object.entries(users);
+    if (!entries.length) {
+        throw new Error('users is empty');
+    }
     const summary = createVoteSummary();
     summary.batchUserResults = [];
     summary.batchRunLabel = await getBatchRunLabel(ctx);
     progress(ctx, summary.batchRunLabel, { batchRunLabel: summary.batchRunLabel });
+
+    const totalUsers = entries.length;
+    const batchProgressId = 'batch-users';
+    const updateBatchUserProgress = (completed, message = '') => {
+        const done = Math.min(Math.max(Number(completed) || 0, 0), totalUsers);
+        const remaining = Math.max(totalUsers - done, 0);
+        const label = `批量点赞用户：已完成 ${done}/${totalUsers}，剩余 ${remaining}`;
+        progressBar(ctx, message || label, done, totalUsers, label, batchProgressId);
+    };
+    updateBatchUserProgress(0);
+
     for (let index = 0; index < entries.length; index += 1) {
         const [name, profileValue] = entries[index];
-        const resolvedProfile = await resolveProfileRef(name, ctx, {
-            label: name,
-            fallback: profileValue,
-        });
-        progress(ctx, `(${index + 1}/${entries.length}) 开始点赞用户：${name}`);
-        const userSummary = await upVoteUser({ ...payload, profileId: resolvedProfile.profileId }, ctx);
-        userSummary.profiles = [
-            resolvedProfile,
-            ...userSummary.profiles.filter((item) => item.profileId !== resolvedProfile.profileId),
-        ];
-        mergeSummary(summary, userSummary);
-        const batchUserResult = {
-            name,
-            maskedName: maskDisplayName(name),
-            profileId: resolvedProfile.profileId,
-            profileUrl: resolvedProfile.profileUrl,
-            total: Number(userSummary.liked || 0) + Number(userSummary.skipped || 0),
-            liked: Number(userSummary.liked || 0),
-            skipped: Number(userSummary.skipped || 0),
-            failed: Number(userSummary.failed || 0),
-            index: index + 1,
-            count: entries.length,
-        };
-        summary.batchUserResults.push(batchUserResult);
-        progress(ctx, `${batchUserResult.maskedName || name}: ${batchUserResult.total}`, { batchUserResult });
+        updateBatchUserProgress(index, `正在点赞用户 ${index + 1}/${totalUsers}：${name}（已完成 ${index}/${totalUsers}，剩余 ${totalUsers - index}）`);
+        try {
+            const resolvedProfile = await resolveProfileRef(name, ctx, {
+                label: name,
+                fallback: profileValue,
+            });
+            const userSummary = await upVoteUser({ ...payload, profileId: resolvedProfile.profileId }, ctx);
+            userSummary.profiles = [
+                resolvedProfile,
+                ...userSummary.profiles.filter((item) => item.profileId !== resolvedProfile.profileId),
+            ];
+            mergeSummary(summary, userSummary);
+            const batchUserResult = {
+                name,
+                maskedName: maskDisplayName(name),
+                profileId: resolvedProfile.profileId,
+                profileUrl: resolvedProfile.profileUrl,
+                total: Number(userSummary.liked || 0) + Number(userSummary.skipped || 0),
+                liked: Number(userSummary.liked || 0),
+                skipped: Number(userSummary.skipped || 0),
+                failed: Number(userSummary.failed || 0),
+                index: index + 1,
+                count: totalUsers,
+            };
+            summary.batchUserResults.push(batchUserResult);
+            progress(ctx, `${batchUserResult.maskedName || name}: ${batchUserResult.total}`, { batchUserResult });
+        } catch (error) {
+            const batchUserResult = {
+                name,
+                maskedName: maskDisplayName(name),
+                profileId: '',
+                profileUrl: '',
+                total: 0,
+                liked: 0,
+                skipped: 0,
+                failed: 1,
+                error: error.message || String(error),
+                index: index + 1,
+                count: totalUsers,
+            };
+            summary.failed += 1;
+            summary.batchUserResults.push(batchUserResult);
+            progress(ctx, `${batchUserResult.maskedName || name}: 失败 - ${batchUserResult.error}`, { batchUserResult });
+        }
+        updateBatchUserProgress(index + 1, `已完成用户 ${index + 1}/${totalUsers}：${name}，剩余 ${totalUsers - index - 1}`);
     }
     return summary;
 }
