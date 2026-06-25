@@ -32,12 +32,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'WQP_SETTINGS_SAVE') {
         return respond(sendResponse, saveSettings(msg.settings));
     }
-    if (msg.type === 'WQP_COMMUNITY_STATE_GET') {
-        return respond(sendResponse, getLocalValue('WQP_CommunityState'));
-    }
-    if (msg.type === 'WQP_COMMUNITY_STATE_SET') {
-        return respond(sendResponse, setLocalValue('WQP_CommunityState', msg.state).then(() => msg.state));
-    }
     if (msg.type === 'WQP_SESSION_GET') {
         return respond(sendResponse, getSessionKeeperState());
     }
