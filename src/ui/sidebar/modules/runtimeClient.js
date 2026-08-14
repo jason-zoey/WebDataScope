@@ -36,3 +36,9 @@ export function createCommunityPort(onEvent) {
         },
     };
 }
+
+export function createMysqlSyncPort(onEvent) {
+    const port = chrome.runtime.connect({ name: 'WQP_MYSQL_SYNC_PORT' });
+    port.onMessage.addListener((message) => onEvent?.(message));
+    return { start(payload) { port.postMessage({ type: 'START', payload }); }, disconnect() { port.disconnect(); } };
+}

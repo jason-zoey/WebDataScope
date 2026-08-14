@@ -1,0 +1,7 @@
+html, body, #app { min-height: 100%; margin: 0; background: #f5f7fa; }
+body { min-width: 900px; font-family: Arial, "Microsoft YaHei", sans-serif; }
+.variant-app { padding: 16px 20px 40px; }
+.variant-toolbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; justify-content: space-between; margin: -16px -20px 14px; padding: 10px 20px; border-bottom: 1px solid #dcdfe6; background: #fff; }
+.variant-toolbar button, .variant-config button { padding: 7px 13px; border: 1px solid #409eff; border-radius: 4px; background: #409eff; color: #fff; cursor: pointer; }
+.variant-config { display: flex; gap: 8px; margin-bottom: 12px; padding: 12px; border: 1px solid #dcdfe6; border-radius: 6px; background: #fff; }
+.variant-config input { min-width: 360px; flex: 1; padding: 8px 10px; border: 1px solid #dcdfe6; border-radius: 4px; }

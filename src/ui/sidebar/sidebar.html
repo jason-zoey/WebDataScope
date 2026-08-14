@@ -20,6 +20,8 @@
         <nav class="tabs" aria-label="侧边栏功能">
             <button class="tab is-active" type="button" data-tab="settings">设置</button>
             <button class="tab" type="button" data-tab="prodmemo">ProdMemo</button>
+            <button class="tab" type="button" data-tab="mysqlSync">MySQL 同步</button>
+            <button class="tab" type="button" data-tab="backtest">回测</button>
             <button class="tab" type="button" data-tab="community">Community</button>
             <button class="tab" type="button" data-tab="help">指南&amp;日志</button>
         </nav>
@@ -149,6 +151,22 @@
                 <input id="prodMemoSearch" type="search" placeholder="输入 Alpha ID">
             </label>
             <div id="prodMemoList" class="cache-list" aria-live="polite"></div>
+        </section>
+
+        <section id="mysqlSyncPanel" class="panel" data-panel="mysqlSync">
+            <div class="section-title">同步到 MySQL</div>
+            <div class="info-box">此同步独立于插件原有 ProdMemo / IndexedDB 同步，会将数据交给 Java 后端写入 MySQL。</div>
+            <label class="field"><span>开始日期</span><input id="mysqlSyncStart" type="date"></label>
+            <label class="field"><span>结束日期</span><input id="mysqlSyncEnd" type="date"></label>
+            <div class="grid-actions"><button id="mysqlSyncStartBtn" class="primary" type="button">开始同步</button><button id="mysqlSyncYesterdayBtn" type="button">同步昨日</button><button id="mysqlSyncClearBtn" type="button">清空日志</button></div>
+            <div id="mysqlSyncResult" class="info-box"></div><ol id="mysqlSyncLog" class="log-list" aria-live="polite"></ol>
+        </section>
+
+        <section id="backtestPanel" class="panel" data-panel="backtest">
+            <div class="section-title">回测队列</div><div id="backtestStats" class="info-box"></div>
+            <div class="grid-actions"><button id="backtestRefreshBtn" class="primary" type="button">刷新</button></div>
+            <div id="backtestGroups" class="cache-list"></div><div class="section-title">任务明细</div>
+            <label class="field"><span>关键词</span><input id="backtestKeyword" type="search" placeholder="Alpha / Variant / 表达式"></label><div id="backtestTasks" class="cache-list"></div>
         </section>
 
         <section id="communityPanel" class="panel" data-panel="community">

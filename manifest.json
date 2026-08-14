@@ -88,6 +88,18 @@
         },
         {
             "matches": [
+                "*://platform.worldquantbrain.com/*"
+            ],
+            "js": [
+                "src/custom/alphaVariant/content.js"
+            ],
+            "css": [
+                "src/custom/alphaVariant/content.css"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
                 "*://platform.worldquantbrain.com/alpha/*",
                 "*://platform.worldquantbrain.com/alphas/unsubmitted",
                 "*://platform.worldquantbrain.com/learn/operators"
@@ -124,6 +136,15 @@
     "web_accessible_resources": [
         {
             "resources": [
+                "src/custom/alphaVariant/dist/*",
+                "src/custom/alphaVariant/dist/assets/*"
+            ],
+            "matches": [
+                "*://platform.worldquantbrain.com/*"
+            ]
+        },
+        {
+            "resources": [
                 "data/*.bin",
                 "data/*.json",
                 "src/vendor/js/*.js",
@@ -158,5 +179,9 @@
         "unlimitedStorage",
         "declarativeNetRequest",
         "webNavigation"
+    ],
+    "optional_host_permissions": [
+        "http://*/*",
+        "https://*/*"
     ]
 }

@@ -7,6 +7,14 @@ const panelInitializers = {
         const { initProdMemoPanel } = await import('./modules/prodMemoPanel.js');
         await initProdMemoPanel();
     },
+    mysqlSync: async () => {
+        const { initMysqlSyncPanel } = await import('./modules/mysqlSyncPanel.js');
+        initMysqlSyncPanel();
+    },
+    backtest: async () => {
+        const { initBacktestQueuePanel } = await import('./modules/backtestQueuePanel.js');
+        await initBacktestQueuePanel();
+    },
     community: async () => {
         await Promise.all([
             import('./modules/favoritePostsPanel.js')
