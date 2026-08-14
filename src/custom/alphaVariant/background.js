@@ -9,7 +9,7 @@ const ALLOWED_PATHS = [
     /^\/api\/variant\/backtest\/groups\/run$/,
     /^\/api\/variant\/backtest\/batches\/[^/?#]+\/retry$/,
     /^\/api\/variant\/backtest\/tasks\/[^/?#]+\/retry$/,
-    /^\/api\/alpha\/db\/detail$/,
+    /^\/api\/alpha\/[^/?#]+$/,
 ];
 
 function normalizeBaseUrl(value) {
@@ -64,9 +64,9 @@ async function apiRequest(request = {}) {
         });
         const text = await response.text();
         let data;
-        try { data = text ? JSON.parse(text) : null; } catch (_) { data = { detail: text || response.statusText }; }
+        try { data = text ? JSON.parse(text) : null; } catch (_) { data = { message: text || response.statusText }; }
         if (!response.ok) {
-            const error = new Error(data?.detail || data?.message || `HTTP ${response.status}`);
+            const error = new Error(data?.message || `HTTP ${response.status}`);
             error.status = response.status;
             error.data = data;
             throw error;
@@ -90,7 +90,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === 'WQP_VARIANT_CONFIG_GET') return respond(sendResponse, getConfig());
     if (message?.type === 'WQP_VARIANT_CONFIG_SAVE') return respond(sendResponse, saveConfig(message.config));
     if (message?.type === 'WQP_VARIANT_CONNECTION_TEST') {
-        return respond(sendResponse, apiRequest({ method: 'GET', path: '/api/alpha/db/detail', params: { alpha_id: '__wqp_connection_test__' }, timeout: 8000 }).catch((error) => {
+        return respond(sendResponse, apiRequest({ method: 'GET', path: '/api/alpha/__wqp_connection_test__', timeout: 8000 }).catch((error) => {
             if (error.status && error.status < 500) return { reachable: true };
             throw error;
         }));
@@ -105,22 +105,17 @@ chrome.runtime.onConnect.addListener((port) => {
         if (message?.type !== 'START') return;
         try {
             const config = await getConfig();
-            const response = await fetch(new URL('/api/alpha/sync/stream', `${config.baseUrl}/`), {
-                method: 'POST', headers: { Accept: 'application/x-ndjson', 'Content-Type': 'application/json' }, body: JSON.stringify(message.payload || {}),
+            port.postMessage({ type: 'progress', message: '正在请求 Alpha 同步接口…' });
+            const response = await fetch(new URL('/api/alpha/sync', `${config.baseUrl}/`), {
+                method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(message.payload || {}),
             });
-            if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
-            const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = '';
-            const emitLines = (chunk) => {
-                buffer += chunk;
-                let index = buffer.indexOf('\n');
-                while (index >= 0) {
-                    const line = buffer.slice(0, index).trim(); buffer = buffer.slice(index + 1); index = buffer.indexOf('\n');
-                    if (!line) continue;
-                    try { const item = JSON.parse(line); if (item.type === 'log') port.postMessage({ type: 'progress', message: item.message }); else if (item.type === 'result') port.postMessage({ type: 'done', ok: true, data: item.data }); else if (item.type === 'error') port.postMessage({ type: 'done', ok: false, error: item.message }); } catch (_) { port.postMessage({ type: 'progress', message: line }); }
-                }
-            };
-            while (true) { const { value, done } = await reader.read(); if (done) break; emitLines(decoder.decode(value, { stream: true })); }
-            emitLines(decoder.decode());
+            const text = await response.text();
+            let envelope;
+            try { envelope = text ? JSON.parse(text) : null; } catch (_) { envelope = { success: false, message: text || response.statusText }; }
+            if (!response.ok || !envelope?.success) {
+                throw new Error(envelope?.message || `HTTP ${response.status}`);
+            }
+            port.postMessage({ type: 'done', ok: true, data: envelope.data });
         } catch (error) { try { port.postMessage({ type: 'done', ok: false, error: error.message || String(error) }); } catch (_) {} }
     });
 });

@@ -260,7 +260,7 @@ async function preview() {
     })
     const data = response.data.data
     if (!response.data.success || !data) {
-      throw new Error(response.data.detail || '获取候选参数失败')
+      throw new Error(response.data.message || '获取候选参数失败')
     }
     candidates.value = { ...emptyCandidates(), ...(data.candidates || {}) }
     sourceExpression.value = data.source_expression || ''
@@ -276,7 +276,7 @@ async function preview() {
     candidatePanelNames.value = ['range']
     setMessage('success', `已获取 ${selectedCount.value} 个默认候选`)
   } catch (error) {
-    setMessage('error', error.response?.data?.detail || error.message || '获取候选参数失败')
+    setMessage('error', error.response?.data?.message || error.message || '获取候选参数失败')
   } finally {
     loading.value = false
   }
@@ -284,7 +284,7 @@ async function preview() {
 
 async function loadSourceDetail(id) {
   try {
-    const response = await axios.get('/api/alpha/db/detail', { params: { alpha_id: id }, timeout: 15000 })
+    const response = await axios.get(`/api/alpha/${encodeURIComponent(id)}`, { timeout: 15000 })
     if (response.data.success) sourceDetail.value = normalizeAlphaRecord(response.data.data)
   } catch {
     sourceDetail.value = null
@@ -375,7 +375,7 @@ async function generate() {
       custom: buildCustom()
     })
     const data = response.data.data || {}
-    if (!response.data.success) throw new Error(response.data.detail || '生成变体失败')
+    if (!response.data.success) throw new Error(response.data.message || '生成变体失败')
     variants.value = data.variants || []
     message.value = ''
     if (variants.value.length) {
@@ -384,7 +384,7 @@ async function generate() {
       setMessage('warning', data.message || '没有可生成的变体')
     }
   } catch (error) {
-    setMessage('error', error.response?.data?.detail || error.message || '生成变体失败')
+    setMessage('error', error.response?.data?.message || error.message || '生成变体失败')
   } finally {
     generating.value = false
   }
@@ -505,11 +505,11 @@ async function refreshTaskStatuses({ silent = true } = {}) {
         return search.toString()
       }
     })
-    if (!response.data.success) throw new Error(response.data.detail || '查询回测状态失败')
+    if (!response.data.success) throw new Error(response.data.message || '查询回测状态失败')
     const results = response.data.data || []
     results.forEach(applyTaskResult)
   } catch (error) {
-    if (!silent) setMessage('error', error.response?.data?.detail || error.message || '查询回测状态失败')
+    if (!silent) setMessage('error', error.response?.data?.message || error.message || '查询回测状态失败')
   } finally {
     const hasActiveTask = variants.value.some(row => ACTIVE_TASK_STATUSES.has(taskStatusOf(row)))
     clearTaskStatusTimer()
@@ -568,7 +568,7 @@ async function saveRelations() {
       confirm_duplicate: Boolean(row.already_exists && forceDuplicates[row.variant_alpha_id])
     }))
     const response = await axios.post('/api/variant/save', { variants: payload })
-    if (!response.data.success) throw new Error(response.data.detail || '变体入库失败')
+    if (!response.data.success) throw new Error(response.data.message || '变体入库失败')
     const results = response.data.data?.results || []
     results.forEach((result, index) => {
       const row = rows[index]
@@ -581,7 +581,7 @@ async function saveRelations() {
     const savedCount = response.data.data?.saved_count ?? results.filter(result => result.saved).length
     setMessage('success', `已确认入库 ${savedCount} 个变体；尚未创建回测任务`)
   } catch (error) {
-    setMessage('error', error.response?.data?.detail || error.message || '变体入库失败')
+    setMessage('error', error.response?.data?.message || error.message || '变体入库失败')
   } finally {
     saving.value = false
   }
@@ -601,7 +601,7 @@ async function createBacktestTasks(immediate) {
   try {
     const endpoint = immediate ? '/api/variant/tasks/immediate' : '/api/variant/tasks/enqueue'
     const response = await axios.post(endpoint, { relation_ids: relationIds })
-    if (!response.data.success) throw new Error(response.data.detail || '创建回测任务失败')
+    if (!response.data.success) throw new Error(response.data.message || '创建回测任务失败')
     const results = response.data.data || []
     results.forEach(applyTaskResult)
     const upgraded = results.filter(result => result.upgraded).length
@@ -610,7 +610,7 @@ async function createBacktestTasks(immediate) {
       : `已加入普通回测队列 ${results.length} 条`)
     await refreshTaskStatuses()
   } catch (error) {
-    setMessage('error', error.response?.data?.detail || error.message || '创建回测任务失败')
+    setMessage('error', error.response?.data?.message || error.message || '创建回测任务失败')
   } finally {
     taskActionLoading.value = ''
   }

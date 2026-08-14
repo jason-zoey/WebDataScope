@@ -4,7 +4,7 @@ function request(method, path, data, config = {}) {
             if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
             if (response?.ok) { resolve(response.data); return; }
             const error = new Error(response?.error || '请求失败');
-            error.response = { status: response?.status, data: response?.data || { detail: response?.error } };
+            error.response = { status: response?.status, data: response?.data || { message: response?.error } };
             reject(error);
         });
     });
