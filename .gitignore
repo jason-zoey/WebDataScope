@@ -27,3 +27,4 @@ telemetry-worker/.generated-secrets.json
 telemetry-worker/.admin-credentials.txt
 telemetry-worker/README.md
 /src/custom/alphaVariant/dist/
+/.idea/
